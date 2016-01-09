@@ -37,11 +37,12 @@ var (
 )
 
 type QuadStore struct {
-	db        *sql.DB
-	sqlFlavor string
-	size      int64
-	lru       *cache
-	noSizes   bool
+	db           *sql.DB
+	sqlFlavor    string
+	size         int64
+	lru          *cache
+	noSizes      bool
+	useEstimates bool
 }
 
 func connectSQLTables(addr string, _ graph.Options) (*sql.DB, error) {
@@ -66,6 +67,7 @@ func createSQLTables(addr string, options graph.Options) error {
 	if err != nil {
 		return err
 	}
+	defer conn.Close()
 	tx, err := conn.Begin()
 	if err != nil {
 		glog.Errorf("Couldn't begin creation transaction: %s", err)
@@ -88,6 +90,11 @@ func createSQLTables(addr string, options graph.Options) error {
 		UNIQUE(subject_hash, predicate_hash, object_hash, label_hash)
 	);`)
 	if err != nil {
+		tx.Rollback()
+		errd := err.(*pq.Error)
+		if errd.Code == "42P07" {
+			return graph.ErrDatabaseExists
+		}
 		glog.Errorf("Cannot create quad table: %v", quadTable)
 		return err
 	}
@@ -104,6 +111,7 @@ func createSQLTables(addr string, options graph.Options) error {
 	`, factor, factor, factor))
 	if err != nil {
 		glog.Errorf("Cannot create indices: %v", index)
+		tx.Rollback()
 		return err
 	}
 	tx.Commit()
@@ -132,6 +140,11 @@ func newQuadStore(addr string, options graph.Options) (graph.QuadStore, error) {
 			qs.noSizes = false
 		}
 	}
+	qs.useEstimates, _, err = options.BoolKey("use_estimates")
+	if err != nil {
+		return nil, err
+	}
+
 	return &qs, nil
 }
 
@@ -186,16 +199,10 @@ func (qs *QuadStore) runTxPostgres(tx *sql.Tx, in []graph.Delta, opts graph.Igno
 		return qs.copyFrom(tx, in)
 	}
 
-	insert, err := tx.Prepare(`INSERT INTO quads(subject, predicate, object, label, id, ts, subject_hash, predicate_hash, object_hash, label_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`)
-	defer insert.Close()
-	if err != nil {
-		glog.Errorf("Cannot prepare insert statement: %v", err)
-		return err
-	}
 	for _, d := range in {
 		switch d.Action {
 		case graph.Add:
-			_, err := insert.Exec(
+			_, err := tx.Exec(`INSERT INTO quads(subject, predicate, object, label, id, ts, subject_hash, predicate_hash, object_hash, label_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);`,
 				d.Quad.Subject,
 				d.Quad.Predicate,
 				d.Quad.Object,
@@ -208,12 +215,12 @@ func (qs *QuadStore) runTxPostgres(tx *sql.Tx, in []graph.Delta, opts graph.Igno
 				hashOf(d.Quad.Label),
 			)
 			if err != nil {
-				glog.Errorf("couldn't prepare INSERT statement: %v", err)
+				glog.Errorf("couldn't exec INSERT statement: %v", err)
 				return err
 			}
 		case graph.Delete:
-			result, err := tx.Exec(`DELETE FROM quads WHERE subject=$1 and predicate=$2 and object=$3 and label=$4;`,
-				d.Quad.Subject, d.Quad.Predicate, d.Quad.Object, d.Quad.Label)
+			result, err := tx.Exec(`DELETE FROM quads WHERE subject_hash=$1 and predicate_hash=$2 and object_hash=$3 and label_hash=$4;`,
+				hashOf(d.Quad.Subject), hashOf(d.Quad.Predicate), hashOf(d.Quad.Object), hashOf(d.Quad.Label))
 			if err != nil {
 				glog.Errorf("couldn't exec DELETE statement: %v", err)
 				return err
@@ -286,7 +293,18 @@ func (qs *QuadStore) Size() int64 {
 	if qs.size != -1 {
 		return qs.size
 	}
-	c := qs.db.QueryRow("SELECT COUNT(*) FROM quads;")
+
+	query := "SELECT COUNT(*) FROM quads;"
+	if qs.useEstimates {
+		switch qs.sqlFlavor {
+		case "postgres":
+			query = "SELECT reltuples::BIGINT AS estimate FROM pg_class WHERE relname='quads';"
+		default:
+			panic("no estimate support for flavor: " + qs.sqlFlavor)
+		}
+	}
+
+	c := qs.db.QueryRow(query)
 	err := c.Scan(&qs.size)
 	if err != nil {
 		glog.Errorf("Couldn't execute COUNT: %v", err)
@@ -299,7 +317,9 @@ func (qs *QuadStore) Horizon() graph.PrimaryKey {
 	var horizon int64
 	err := qs.db.QueryRow("SELECT horizon FROM quads ORDER BY horizon DESC LIMIT 1;").Scan(&horizon)
 	if err != nil {
-		glog.Errorf("Couldn't execute horizon: %v", err)
+		if err != sql.ErrNoRows {
+			glog.Errorf("Couldn't execute horizon: %v", err)
+		}
 		return graph.NewSequentialKey(0)
 	}
 	return graph.NewSequentialKey(horizon)

@@ -17,13 +17,15 @@ package database
 import (
 	"testing"
 
+	"github.com/coreos/clair/config"
 	"github.com/coreos/clair/utils"
+	cerrors "github.com/coreos/clair/utils/errors"
 	"github.com/stretchr/testify/assert"
 )
 
 // TestInvalidLayers tries to insert invalid layers
 func TestInvalidLayers(t *testing.T) {
-	Open("memstore", "")
+	Open(&config.DatabaseConfig{Type: "memstore"})
 	defer Close()
 
 	assert.Error(t, InsertLayer(&Layer{ID: ""})) // No ID
@@ -32,13 +34,13 @@ func TestInvalidLayers(t *testing.T) {
 // TestLayerSimple inserts a single layer and ensures it can be retrieved and
 // that methods works
 func TestLayerSimple(t *testing.T) {
-	Open("memstore", "")
+	Open(&config.DatabaseConfig{Type: "memstore"})
 	defer Close()
 
 	// Insert a layer and find it back
 	l1 := &Layer{ID: "l1", OS: "os1", InstalledPackagesNodes: []string{"p1", "p2"}, EngineVersion: 1}
 	if assert.Nil(t, InsertLayer(l1)) {
-		fl1, err := FindOneLayerByID("l1", FieldLayerAll)
+		fl1, err := FindOneLayerByID(l1.ID, FieldLayerAll)
 		if assert.Nil(t, err) && assert.NotNil(t, fl1) {
 			// Saved = found
 			assert.True(t, layerEqual(l1, fl1), "layers are not equal, expected %v, have %s", l1, fl1)
@@ -66,12 +68,18 @@ func TestLayerSimple(t *testing.T) {
 		if assert.Nil(t, err) && assert.Len(t, al1, 1) {
 			assert.Equal(t, al1[0].Node, l1.Node)
 		}
+
+		// Delete
+		if assert.Nil(t, DeleteLayer(l1.ID)) {
+			_, err := FindOneLayerByID(l1.ID, FieldLayerAll)
+			assert.Equal(t, cerrors.ErrNotFound, err)
+		}
 	}
 }
 
 // TestLayerTree inserts a tree of layers and ensure that the tree lgoic works
 func TestLayerTree(t *testing.T) {
-	Open("memstore", "")
+	Open(&config.DatabaseConfig{Type: "memstore"})
 	defer Close()
 
 	var layers []*Layer
@@ -119,11 +127,19 @@ func TestLayerTree(t *testing.T) {
 		fl4bpkg, err := flayers[4].AllPackages()
 		assert.Nil(t, err)
 		assert.Len(t, fl4bpkg, 0)
+
+		// Delete a layer in the middle of the tree.
+		if assert.Nil(t, DeleteLayer(flayers[1].ID)) {
+			for _, l := range layers[1:] {
+				_, err := FindOneLayerByID(l.ID, FieldLayerAll)
+				assert.Equal(t, cerrors.ErrNotFound, err)
+			}
+		}
 	}
 }
 
 func TestLayerUpdate(t *testing.T) {
-	Open("memstore", "")
+	Open(&config.DatabaseConfig{Type: "memstore"})
 	defer Close()
 
 	l1 := &Layer{ID: "l1", OS: "os1", InstalledPackagesNodes: []string{"p1", "p2"}, RemovedPackagesNodes: []string{"p3", "p4"}, EngineVersion: 1}

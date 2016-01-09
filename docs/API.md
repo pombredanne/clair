@@ -112,7 +112,8 @@ It processes and inserts a new Layer in the database.
 |------|-----|-------------|
 |ID|String|Unique ID of the Layer|
 |Path|String|Absolute path or HTTP link pointing to the Layer's tar file|
-|ParentID|String|(Optionnal) Unique ID of the Layer's parent
+|ParentID|String|(Optional) Unique ID of the Layer's parent|
+|ImageFormat|String|Image format of the Layer ('Docker' or 'ACI')|
 
 If the Layer has not parent, the ParentID field should be omitted or empty.
 
@@ -149,6 +150,41 @@ HTTP/1.1 400 Bad Request
 ```
 
 It could also return a `415 Unsupported Media Type` response with a `Message` if the request content is not valid JSON.
+
+## Delete a Layer
+
+It deletes a layer from the database and any child layers that are dependent on the specified layer.
+
+	DELETE /v1/layers/{ID}
+
+### Parameters
+
+|Name|Type|Description|
+|------|-----|-------------|
+|ID|String|Unique ID of the Layer|
+
+### Example
+
+```
+curl -s -X DELETE 127.0.0.1:6060/v1/layers/39bb80489af75406073b5364c9c326134015140e1f7976a370a8bd446889e6f8
+```
+
+### Success Response
+
+```
+HTTP/1.1 204 No Content
+```
+
+### Error Response
+
+```
+HTTP/1.1 404 Not Found
+{
+    "Message": "the resource cannot be found"
+}
+```
+
+//////////
 
 ## Get a Layer's operating system
 
@@ -210,6 +246,7 @@ HTTP/1.1 200 OK
 ```
 
 ### Error Response
+
 ```
 HTTP/1.1 404 Not Found
 {
@@ -310,7 +347,7 @@ It returns the lists of vulnerabilities which affect a given Layer.
 |Name|Type|Description|
 |------|-----|-------------|
 |ID|String|Unique ID of the Layer|
-|minimumPriority|Priority|(Optionnal) The minimum priority of the returned vulnerabilities. Defaults to High|
+|minimumPriority|Priority|(Optional) The minimum priority of the returned vulnerabilities. Defaults to High|
 
 ### Example
 
@@ -326,7 +363,8 @@ HTTP/1.1 200 OK
             "ID": "CVE-2014-2583",
             "Link": "http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-2583",
             "Priority": "Low",
-            "Description": "Multiple directory traversal vulnerabilities in pam_timestamp.c in the pam_timestamp module for Linux-PAM (aka pam) 1.1.8 allow local users to create aribitrary files or possibly bypass authentication via a .. (dot dot) in the (1) PAM_RUSER value to the get_ruser function or (2) PAM_TTY value to the check_tty funtion, which is used by the format_timestamp_name function."
+            "Description": "Multiple directory traversal vulnerabilities in pam_timestamp.c in the pam_timestamp module for Linux-PAM (aka pam) 1.1.8 allow local users to create aribitrary files or possibly bypass authentication via a .. (dot dot) in the (1) PAM_RUSER value to the get_ruser function or (2) PAM_TTY value to the check_tty funtion, which is used by the format_timestamp_name function.",
+            "CausedByPackage": "pam"
         },
         [...]
 }
@@ -352,7 +390,7 @@ It returns the lists of vulnerabilities which are introduced and removed by the 
 |Name|Type|Description|
 |------|-----|-------------|
 |ID|String|Unique ID of the Layer|
-|minimumPriority|Priority|(Optionnal) The minimum priority of the returned vulnerabilities|
+|minimumPriority|Priority|(Optional) The minimum priority of the returned vulnerabilities|
 
 ### Example
 
@@ -368,7 +406,8 @@ HTTP/1.1 200 OK
             "ID": "CVE-2014-2583",
             "Link": "http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-2583",
             "Priority": "Low",
-            "Description": "Multiple directory traversal vulnerabilities in pam_timestamp.c in the pam_timestamp module for Linux-PAM (aka pam) 1.1.8 allow local users to create aribitrary files or possibly bypass authentication via a .. (dot dot) in the (1) PAM_RUSER value to the get_ruser function or (2) PAM_TTY value to the check_tty funtion, which is used by the format_timestamp_name function."
+            "Description": "Multiple directory traversal vulnerabilities in pam_timestamp.c in the pam_timestamp module for Linux-PAM (aka pam) 1.1.8 allow local users to create aribitrary files or possibly bypass authentication via a .. (dot dot) in the (1) PAM_RUSER value to the get_ruser function or (2) PAM_TTY value to the check_tty funtion, which is used by the format_timestamp_name function.",
+            "CausedByPackage": "pam"
         },
         [...]
     ],
@@ -398,7 +437,7 @@ Counterintuitively, this request is actually a POST to be able to pass a lot of 
 |Name|Type|Description|
 |------|-----|-------------|
 |LayersIDs|Array of strings|Unique IDs of Layers|
-|minimumPriority|Priority|(Optionnal) The minimum priority of the returned vulnerabilities. Defaults to High|
+|minimumPriority|Priority|(Optional) The minimum priority of the returned vulnerabilities. Defaults to High|
 
 ### Example
 
@@ -424,7 +463,8 @@ HTTP/1.1 200 OK
                 "ID": "CVE-2014-2583",
                 "Link": "http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-2583",
                 "Priority": "Low",
-                "Description": "Multiple directory traversal vulnerabilities in pam_timestamp.c in the pam_timestamp module for Linux-PAM (aka pam) 1.1.8 allow local users to create aribitrary files or possibly bypass authentication via a .. (dot dot) in the (1) PAM_RUSER value to the get_ruser function or (2) PAM_TTY value to the check_tty funtion, which is used by the format_timestamp_name function."
+                "Description": "Multiple directory traversal vulnerabilities in pam_timestamp.c in the pam_timestamp module for Linux-PAM (aka pam) 1.1.8 allow local users to create aribitrary files or possibly bypass authentication via a .. (dot dot) in the (1) PAM_RUSER value to the get_ruser function or (2) PAM_TTY value to the check_tty funtion, which is used by the format_timestamp_name function.",
+                "CausedByPackage": "pam"
             },
             [...]
 					]

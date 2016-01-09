@@ -65,8 +65,6 @@ var (
 		"product": struct{}{},
 	}
 
-	branchedRegexp            = regexp.MustCompile(`Branched (\d+) revisions.`)
-	revisionRegexp            = regexp.MustCompile(`Now on revision (\d+).`)
 	affectsCaptureRegexp      = regexp.MustCompile(`(?P<release>.*)_(?P<package>.*): (?P<status>[^\s]*)( \(+(?P<note>[^()]*)\)+)?`)
 	affectsCaptureRegexpNames = affectsCaptureRegexp.SubexpNames()
 )
@@ -84,7 +82,6 @@ func (fetcher *UbuntuFetcher) FetchUpdate() (resp updater.FetcherResponse, err e
 	log.Info("fetching Ubuntu vulneratibilities")
 
 	// Check to see if the repository does not already exist.
-	var revisionNumber int
 	if _, pathExists := os.Stat(repositoryLocalPath); repositoryLocalPath == "" || os.IsNotExist(pathExists) {
 		// Create a temporary folder and download the repository.
 		p, err := ioutil.TempDir(os.TempDir(), "ubuntu-cve-tracker")
@@ -96,16 +93,22 @@ func (fetcher *UbuntuFetcher) FetchUpdate() (resp updater.FetcherResponse, err e
 		repositoryLocalPath = p + "/repository"
 
 		// Create the new repository.
-		revisionNumber, err = createRepository(repositoryLocalPath)
+		err = createRepository(repositoryLocalPath)
 		if err != nil {
 			return resp, err
 		}
 	} else {
 		// Update the repository that's already on disk.
-		revisionNumber, err = updateRepository(repositoryLocalPath)
+		err = updateRepository(repositoryLocalPath)
 		if err != nil {
 			return resp, err
 		}
+	}
+
+	// Get revision number.
+	revisionNumber, err := getRevisionNumber(repositoryLocalPath)
+	if err != nil {
+		return resp, err
 	}
 
 	// Get the latest revision number we successfully applied in the database.
@@ -128,15 +131,15 @@ func (fetcher *UbuntuFetcher) FetchUpdate() (resp updater.FetcherResponse, err e
 			// commit.
 			continue
 		}
-		defer file.Close()
 
-		v, unknownReleases, err := parseUbuntuCVE(file)
+		v, pkgs, unknownReleases, err := parseUbuntuCVE(file)
 		if err != nil {
 			return resp, err
 		}
 
-		if len(v.FixedIn) > 0 {
+		if len(v.FixedInNodes) > 0 {
 			resp.Vulnerabilities = append(resp.Vulnerabilities, v)
+			resp.Packages = append(resp.Packages, pkgs...)
 		}
 
 		// Log any unknown releases.
@@ -150,6 +153,13 @@ func (fetcher *UbuntuFetcher) FetchUpdate() (resp updater.FetcherResponse, err e
 			dbRevisionNumberInt, _ := strconv.Atoi(dbRevisionNumber)
 			revisionNumber = dbRevisionNumberInt
 		}
+
+		// Close the file manually.
+		//
+		// We do that instead of using defer because defer works on a function-level scope.
+		// We would open many files and close them all at once at the end of the function,
+		// which could lead to exceed fs.file-max.
+		file.Close()
 	}
 
 	// Add flag information
@@ -170,7 +180,6 @@ func collectModifiedVulnerabilities(revision int, dbRevision, repositoryLocalPat
 				log.Errorf("could not open Ubuntu vulnerabilities repository's folder: %s", err)
 				return nil, ErrFilesystem
 			}
-			defer d.Close()
 
 			// Get the FileInfo of all the files in the directory.
 			names, err := d.Readdirnames(-1)
@@ -185,6 +194,13 @@ func collectModifiedVulnerabilities(revision int, dbRevision, repositoryLocalPat
 					modifiedCVE[folder+"/"+name] = struct{}{}
 				}
 			}
+
+			// Close the file manually.
+			//
+			// We do that instead of using defer because defer works on a function-level scope.
+			// We would open many files and close them all at once at the end of the function,
+			// which could lead to exceed fs.file-max.
+			d.Close()
 		}
 
 		return modifiedCVE, nil
@@ -200,7 +216,7 @@ func collectModifiedVulnerabilities(revision int, dbRevision, repositoryLocalPat
 	// Handle a database that needs upgrading.
 	out, err := utils.Exec(repositoryLocalPath, "bzr", "log", "--verbose", "-r"+strconv.Itoa(dbRevisionInt+1)+"..", "-n0")
 	if err != nil {
-		log.Errorf("could not get Ubuntu vulnerabilities repository logs: %s. output: %s", err, string(out))
+		log.Errorf("could not get Ubuntu vulnerabilities repository logs: %s. output: %s", err, out)
 		return nil, cerrors.ErrCouldNotDownload
 	}
 
@@ -218,65 +234,42 @@ func collectModifiedVulnerabilities(revision int, dbRevision, repositoryLocalPat
 	return modifiedCVE, nil
 }
 
-func createRepository(pathToRepo string) (int, error) {
+func createRepository(pathToRepo string) error {
 	// Branch repository
 	out, err := utils.Exec("/tmp/", "bzr", "branch", ubuntuTracker, pathToRepo)
 	if err != nil {
-		log.Errorf("could not branch Ubuntu repository: %s. output: %s", err, string(out))
-		return 0, cerrors.ErrCouldNotDownload
+		log.Errorf("could not branch Ubuntu repository: %s. output: %s", err, out)
+		return cerrors.ErrCouldNotDownload
 	}
-
-	// Get revision number
-	regexpMatches := branchedRegexp.FindStringSubmatch(string(out))
-	if len(regexpMatches) != 2 {
-		log.Error("could not parse bzr branch output to get the revision number")
-		return 0, cerrors.ErrCouldNotDownload
-	}
-
-	revision, err := strconv.Atoi(regexpMatches[1])
-	if err != nil {
-		log.Error("could not parse bzr branch output to get the revision number")
-		return 0, cerrors.ErrCouldNotDownload
-	}
-
-	return revision, err
+	return nil
 }
 
-func updateRepository(pathToRepo string) (int, error) {
+func updateRepository(pathToRepo string) error {
 	// Pull repository
 	out, err := utils.Exec(pathToRepo, "bzr", "pull", "--overwrite")
 	if err != nil {
-		log.Errorf("could not pull Ubuntu repository: %s. output: %s", err, string(out))
-		return 0, cerrors.ErrCouldNotDownload
+		log.Errorf("could not pull Ubuntu repository: %s. output: %s", err, out)
+		return cerrors.ErrCouldNotDownload
 	}
+	return nil
+}
 
-	// Get revision number
-	if strings.Contains(string(out), "No revisions or tags to pull") {
-		out, _ = utils.Exec(pathToRepo, "bzr", "revno")
-		revno, err := strconv.Atoi(string(out[:len(out)-1]))
-		if err != nil {
-			log.Errorf("could not parse Ubuntu repository revision number: %s. output: %s", err, string(out))
-			return 0, cerrors.ErrCouldNotDownload
-		}
-		return revno, nil
-	}
-
-	regexpMatches := revisionRegexp.FindStringSubmatch(string(out))
-	if len(regexpMatches) != 2 {
-		log.Error("could not parse bzr pull output to get the revision number")
-		return 0, cerrors.ErrCouldNotDownload
-	}
-
-	revno, err := strconv.Atoi(regexpMatches[1])
+func getRevisionNumber(pathToRepo string) (int, error) {
+	out, err := utils.Exec(pathToRepo, "bzr", "revno")
 	if err != nil {
-		log.Error("could not parse bzr pull output to get the revision number")
+		log.Errorf("could not get Ubuntu repository's revision number: %s. output: %s", err, out)
 		return 0, cerrors.ErrCouldNotDownload
 	}
-
+	revno, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		log.Errorf("could not parse Ubuntu repository's revision number: %s. output: %s", err, out)
+		return 0, cerrors.ErrCouldNotDownload
+	}
 	return revno, nil
 }
 
-func parseUbuntuCVE(fileContent io.Reader) (vulnerability updater.FetcherVulnerability, unknownReleases map[string]struct{}, err error) {
+func parseUbuntuCVE(fileContent io.Reader) (vulnerability *database.Vulnerability, packages []*database.Package, unknownReleases map[string]struct{}, err error) {
+	vulnerability = &database.Vulnerability{}
 	unknownReleases = make(map[string]struct{})
 	readingDescription := false
 	scanner := bufio.NewScanner(fileContent)
@@ -372,7 +365,13 @@ func parseUbuntuCVE(fileContent io.Reader) (vulnerability updater.FetcherVulnera
 				}
 
 				// Create and add the new package.
-				vulnerability.FixedIn = append(vulnerability.FixedIn, &database.Package{OS: "ubuntu:" + database.UbuntuReleasesMapping[md["release"]], Name: md["package"], Version: version})
+				pkg := &database.Package{
+					OS:      "ubuntu:" + database.UbuntuReleasesMapping[md["release"]],
+					Name:    md["package"],
+					Version: version,
+				}
+				packages = append(packages, pkg)
+				vulnerability.FixedInNodes = append(vulnerability.FixedInNodes, pkg.GetNode())
 			}
 		}
 	}

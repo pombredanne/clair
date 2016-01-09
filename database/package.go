@@ -26,12 +26,14 @@ import (
 )
 
 const (
-	FieldPackageIsValue         = "package"
 	FieldPackageOS              = "os"
 	FieldPackageName            = "name"
 	FieldPackageVersion         = "version"
 	FieldPackageNextVersion     = "nextVersion"
 	FieldPackagePreviousVersion = "previousVersion"
+
+	// This field is not selectable and is for internal use only.
+	fieldPackageIsValue = "package"
 )
 
 var FieldPackageAll = []string{FieldPackageOS, FieldPackageName, FieldPackageVersion, FieldPackageNextVersion, FieldPackagePreviousVersion}
@@ -49,7 +51,7 @@ type Package struct {
 // GetNode returns an unique identifier for the graph node
 // Requires the key fields: OS, Name, Version
 func (p *Package) GetNode() string {
-	return FieldPackageIsValue + ":" + utils.Hash(p.Key())
+	return fieldPackageIsValue + ":" + utils.Hash(p.Key())
 }
 
 // Key returns an unique string defining p
@@ -154,11 +156,11 @@ func InsertPackages(packageParameters []*Package) error {
 			}
 			endPackage.Node = endPackage.GetNode()
 
-			t.AddQuad(cayley.Quad(endPackage.Node, FieldIs, FieldPackageIsValue, ""))
-			t.AddQuad(cayley.Quad(endPackage.Node, FieldPackageOS, endPackage.OS, ""))
-			t.AddQuad(cayley.Quad(endPackage.Node, FieldPackageName, endPackage.Name, ""))
-			t.AddQuad(cayley.Quad(endPackage.Node, FieldPackageVersion, endPackage.Version.String(), ""))
-			t.AddQuad(cayley.Quad(endPackage.Node, FieldPackageNextVersion, "", ""))
+			t.AddQuad(cayley.Triple(endPackage.Node, fieldIs, fieldPackageIsValue))
+			t.AddQuad(cayley.Triple(endPackage.Node, FieldPackageOS, endPackage.OS))
+			t.AddQuad(cayley.Triple(endPackage.Node, FieldPackageName, endPackage.Name))
+			t.AddQuad(cayley.Triple(endPackage.Node, FieldPackageVersion, endPackage.Version.String()))
+			t.AddQuad(cayley.Triple(endPackage.Node, FieldPackageNextVersion, ""))
 
 			// Create the inserted package if it is different than a start/end package
 			var newPackage *Package
@@ -170,11 +172,11 @@ func InsertPackages(packageParameters []*Package) error {
 				}
 				newPackage.Node = newPackage.GetNode()
 
-				t.AddQuad(cayley.Quad(newPackage.Node, FieldIs, FieldPackageIsValue, ""))
-				t.AddQuad(cayley.Quad(newPackage.Node, FieldPackageOS, newPackage.OS, ""))
-				t.AddQuad(cayley.Quad(newPackage.Node, FieldPackageName, newPackage.Name, ""))
-				t.AddQuad(cayley.Quad(newPackage.Node, FieldPackageVersion, newPackage.Version.String(), ""))
-				t.AddQuad(cayley.Quad(newPackage.Node, FieldPackageNextVersion, endPackage.Node, ""))
+				t.AddQuad(cayley.Triple(newPackage.Node, fieldIs, fieldPackageIsValue))
+				t.AddQuad(cayley.Triple(newPackage.Node, FieldPackageOS, newPackage.OS))
+				t.AddQuad(cayley.Triple(newPackage.Node, FieldPackageName, newPackage.Name))
+				t.AddQuad(cayley.Triple(newPackage.Node, FieldPackageVersion, newPackage.Version.String()))
+				t.AddQuad(cayley.Triple(newPackage.Node, FieldPackageNextVersion, endPackage.Node))
 
 				packageParameter.Node = newPackage.Node
 			}
@@ -187,14 +189,14 @@ func InsertPackages(packageParameters []*Package) error {
 			}
 			startPackage.Node = startPackage.GetNode()
 
-			t.AddQuad(cayley.Quad(startPackage.Node, FieldIs, FieldPackageIsValue, ""))
-			t.AddQuad(cayley.Quad(startPackage.Node, FieldPackageOS, startPackage.OS, ""))
-			t.AddQuad(cayley.Quad(startPackage.Node, FieldPackageName, startPackage.Name, ""))
-			t.AddQuad(cayley.Quad(startPackage.Node, FieldPackageVersion, startPackage.Version.String(), ""))
+			t.AddQuad(cayley.Triple(startPackage.Node, fieldIs, fieldPackageIsValue))
+			t.AddQuad(cayley.Triple(startPackage.Node, FieldPackageOS, startPackage.OS))
+			t.AddQuad(cayley.Triple(startPackage.Node, FieldPackageName, startPackage.Name))
+			t.AddQuad(cayley.Triple(startPackage.Node, FieldPackageVersion, startPackage.Version.String()))
 			if !insertingStartPackage && !insertingEndPackage {
-				t.AddQuad(cayley.Quad(startPackage.Node, FieldPackageNextVersion, newPackage.Node, ""))
+				t.AddQuad(cayley.Triple(startPackage.Node, FieldPackageNextVersion, newPackage.Node))
 			} else {
-				t.AddQuad(cayley.Quad(startPackage.Node, FieldPackageNextVersion, endPackage.Node, ""))
+				t.AddQuad(cayley.Triple(startPackage.Node, FieldPackageNextVersion, endPackage.Node))
 			}
 
 			// Set package node
@@ -211,10 +213,10 @@ func InsertPackages(packageParameters []*Package) error {
 			newPackage.Node = "package:" + utils.Hash(newPackage.Key())
 			packageParameter.Node = newPackage.Node
 
-			t.AddQuad(cayley.Quad(newPackage.Node, FieldIs, FieldPackageIsValue, ""))
-			t.AddQuad(cayley.Quad(newPackage.Node, FieldPackageOS, newPackage.OS, ""))
-			t.AddQuad(cayley.Quad(newPackage.Node, FieldPackageName, newPackage.Name, ""))
-			t.AddQuad(cayley.Quad(newPackage.Node, FieldPackageVersion, newPackage.Version.String(), ""))
+			t.AddQuad(cayley.Triple(newPackage.Node, fieldIs, fieldPackageIsValue))
+			t.AddQuad(cayley.Triple(newPackage.Node, FieldPackageOS, newPackage.OS))
+			t.AddQuad(cayley.Triple(newPackage.Node, FieldPackageName, newPackage.Name))
+			t.AddQuad(cayley.Triple(newPackage.Node, FieldPackageVersion, newPackage.Version.String()))
 
 			// Sort branchPackages by version (including the new package)
 			branchPackages = append(branchPackages, newPackage)
@@ -242,13 +244,13 @@ func InsertPackages(packageParameters []*Package) error {
 			}
 
 			// Link the new packages with the branch
-			t.RemoveQuad(cayley.Quad(pred.Node, FieldPackageNextVersion, succ.Node, ""))
+			t.RemoveQuad(cayley.Triple(pred.Node, FieldPackageNextVersion, succ.Node))
 
 			pred.NextVersionNode = newPackage.Node
-			t.AddQuad(cayley.Quad(pred.Node, FieldPackageNextVersion, newPackage.Node, ""))
+			t.AddQuad(cayley.Triple(pred.Node, FieldPackageNextVersion, newPackage.Node))
 
 			newPackage.NextVersionNode = succ.Node
-			t.AddQuad(cayley.Quad(newPackage.Node, FieldPackageNextVersion, succ.Node, ""))
+			t.AddQuad(cayley.Triple(newPackage.Node, FieldPackageNextVersion, succ.Node))
 		}
 
 		// Apply transaction
@@ -265,7 +267,7 @@ func InsertPackages(packageParameters []*Package) error {
 // FindOnePackage finds and returns a single package having the given OS, name and version, selecting the specified fields
 func FindOnePackage(OS, name string, version types.Version, selectedFields []string) (*Package, error) {
 	packageParameter := Package{OS: OS, Name: name, Version: version}
-	p, err := toPackages(cayley.StartPath(store, packageParameter.GetNode()).Has(FieldIs, FieldPackageIsValue), selectedFields)
+	p, err := toPackages(cayley.StartPath(store, packageParameter.GetNode()).Has(fieldIs, fieldPackageIsValue), selectedFields)
 
 	if err != nil {
 		return nil, err
@@ -283,11 +285,10 @@ func FindOnePackage(OS, name string, version types.Version, selectedFields []str
 // FindAllPackagesByNodes finds and returns all packages given by their nodes, selecting the specified fields
 func FindAllPackagesByNodes(nodes []string, selectedFields []string) ([]*Package, error) {
 	if len(nodes) == 0 {
-		log.Warning("could not FindAllPackagesByNodes with an empty nodes array.")
 		return []*Package{}, nil
 	}
 
-	return toPackages(cayley.StartPath(store, nodes...).Has(FieldIs, FieldPackageIsValue), selectedFields)
+	return toPackages(cayley.StartPath(store, nodes...).Has(fieldIs, fieldPackageIsValue), selectedFields)
 }
 
 // FindAllPackagesByBranch finds and returns all packages that belong to the given Branch, selecting the specified fields

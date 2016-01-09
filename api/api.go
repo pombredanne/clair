@@ -17,68 +17,78 @@
 package api
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
 
-	"crypto/tls"
-	"crypto/x509"
-
 	"github.com/coreos/pkg/capnslog"
-	"github.com/coreos/clair/utils"
 	"github.com/tylerb/graceful"
+
+	"github.com/coreos/clair/config"
+	"github.com/coreos/clair/utils"
 )
 
 var log = capnslog.NewPackageLogger("github.com/coreos/clair", "api")
 
-// Config represents the configuration for the Main API.
-type Config struct {
-	Port                      int
-	TimeOut                   time.Duration
-	CertFile, KeyFile, CAFile string
-}
-
-// RunMain launches the main API, which exposes every possible interactions
+// Run launches the main API, which exposes every possible interactions
 // with clair.
-func RunMain(conf *Config, st *utils.Stopper) {
-	log.Infof("starting API on port %d.", conf.Port)
-	defer func() {
-		log.Info("API stopped")
-		st.End()
-	}()
+func Run(config *config.APIConfig, st *utils.Stopper) {
+	defer st.End()
+
+	// Do not run the API service if there is no config.
+	if config == nil {
+		log.Infof("main API service is disabled.")
+		return
+	}
+	log.Infof("starting main API on port %d.", config.Port)
+
+	tlsConfig, err := tlsClientConfig(config.CAFile)
+	if err != nil {
+		log.Fatalf("could not initialize client cert authentication: %s\n", err)
+	}
+	if tlsConfig != nil {
+		log.Info("main API configured with client certificate authentication")
+	}
 
 	srv := &graceful.Server{
 		Timeout:          0,    // Already handled by our TimeOut middleware
 		NoSignalHandling: true, // We want to use our own Stopper
 		Server: &http.Server{
-			Addr:      ":" + strconv.Itoa(conf.Port),
-			TLSConfig: setupClientCert(conf.CAFile),
-			Handler:   NewVersionRouter(conf.TimeOut),
+			Addr:      ":" + strconv.Itoa(config.Port),
+			TLSConfig: tlsConfig,
+			Handler:   NewVersionRouter(config.Timeout),
 		},
 	}
-	listenAndServeWithStopper(srv, st, conf.CertFile, conf.KeyFile)
+	listenAndServeWithStopper(srv, st, config.CertFile, config.KeyFile)
+	log.Info("main API stopped")
 }
 
 // RunHealth launches the Health API, which only exposes a method to fetch
-// clair's health without any security or authentification mechanism.
-func RunHealth(port int, st *utils.Stopper) {
-	log.Infof("starting Health API on port %d.", port)
-	defer func() {
-		log.Info("Health API stopped")
-		st.End()
-	}()
+// Clair's health without any security or authentication mechanism.
+func RunHealth(config *config.APIConfig, st *utils.Stopper) {
+	defer st.End()
+
+	// Do not run the API service if there is no config.
+	if config == nil {
+		log.Infof("health API service is disabled.")
+		return
+	}
+	log.Infof("starting health API on port %d.", config.HealthPort)
 
 	srv := &graceful.Server{
 		Timeout:          10 * time.Second, // Interrupt health checks when stopping
 		NoSignalHandling: true,             // We want to use our own Stopper
 		Server: &http.Server{
-			Addr:    ":" + strconv.Itoa(port),
+			Addr:    ":" + strconv.Itoa(config.HealthPort),
 			Handler: NewHealthRouter(),
 		},
 	}
 	listenAndServeWithStopper(srv, st, "", "")
+	log.Info("health API stopped")
 }
 
 // listenAndServeWithStopper wraps graceful.Server's
@@ -103,24 +113,29 @@ func listenAndServeWithStopper(srv *graceful.Server, st *utils.Stopper, certFile
 	}
 }
 
-// setupClientCert creates a tls.Config instance using a CA file path
-// (if provided) and and calls log.Fatal if it does not exist.
-func setupClientCert(caFile string) *tls.Config {
-	if len(caFile) > 0 {
-		log.Info("API: Client Certificate Authentification Enabled")
-		caCert, err := ioutil.ReadFile(caFile)
-		if err != nil {
-			log.Fatal(err)
-		}
-		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
-		return &tls.Config{
-			ClientCAs:  caCertPool,
-			ClientAuth: tls.RequireAndVerifyClientCert,
-		}
+// tlsClientConfig initializes a *tls.Config using the given CA. The resulting
+// *tls.Config is meant to be used to configure an HTTP server to do client
+// certificate authentication.
+//
+// If no CA is given, a nil *tls.Config is returned; no client certificate will
+// be required and verified. In other words, authentication will be disabled.
+func tlsClientConfig(caPath string) (*tls.Config, error) {
+	if caPath == "" {
+		return nil, nil
 	}
 
-	return &tls.Config{
-		ClientAuth: tls.NoClientCert,
+	caCert, err := ioutil.ReadFile(caPath)
+	if err != nil {
+		return nil, err
 	}
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
+	tlsConfig := &tls.Config{
+		ClientCAs:  caCertPool,
+		ClientAuth: tls.RequireAndVerifyClientCert,
+	}
+
+	return tlsConfig, nil
 }

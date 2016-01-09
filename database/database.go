@@ -21,9 +21,10 @@ import (
 	"os"
 
 	"github.com/barakmich/glog"
-	"github.com/coreos/pkg/capnslog"
+	"github.com/coreos/clair/config"
 	"github.com/coreos/clair/health"
 	"github.com/coreos/clair/utils"
+	"github.com/coreos/pkg/capnslog"
 	"github.com/google/cayley"
 	"github.com/google/cayley/graph"
 	"github.com/google/cayley/graph/path"
@@ -37,8 +38,8 @@ import (
 )
 
 const (
-	// FieldIs is the graph predicate defining the type of an entity.
-	FieldIs = "is"
+	// fieldIs is the graph predicate defining the type of an entity.
+	fieldIs = "is"
 )
 
 var (
@@ -63,32 +64,45 @@ func init() {
 }
 
 // Open opens a Cayley database, creating it if necessary and return its handle
-func Open(dbType, dbPath string) error {
+func Open(config *config.DatabaseConfig) error {
 	if store != nil {
-		log.Errorf("could not open database at %s : a database is already opened", dbPath)
+		log.Errorf("could not open database at %s : a database is already opened", config.Path)
+		return ErrCantOpen
+	}
+	if config.Type != "memstore" && config.Path == "" {
+		log.Errorf("could not open database : no path provided.")
 		return ErrCantOpen
 	}
 
 	var err error
+	options := make(graph.Options)
 
-	// Try to create database if necessary
-	if dbType == "bolt" || dbType == "leveldb" {
-		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-			// No, initialize it if possible
-			log.Infof("database at %s does not exist yet, creating it", dbPath)
+	switch config.Type {
+	case "bolt", "leveldb":
+		if _, err := os.Stat(config.Path); os.IsNotExist(err) {
+			log.Infof("database at %s does not exist yet, creating it", config.Path)
 
-			if err = graph.InitQuadStore(dbType, dbPath, nil); err != nil {
-				log.Errorf("could not create database at %s : %s", dbPath, err)
+			err = graph.InitQuadStore(config.Type, config.Path, options)
+			if err != nil && err != graph.ErrDatabaseExists {
+				log.Errorf("could not create database at %s : %s", config.Path, err)
 				return ErrCantOpen
 			}
 		}
-	} else if dbType == "sql" {
-		graph.InitQuadStore(dbType, dbPath, nil)
+	case "sql":
+		// Replaces the PostgreSQL's slow COUNT query with a fast estimator.
+		// Ref: https://wiki.postgresql.org/wiki/Count_estimate
+		options["use_estimates"] = true
+
+		err := graph.InitQuadStore(config.Type, config.Path, options)
+		if err != nil && err != graph.ErrDatabaseExists {
+			log.Errorf("could not create database at %s : %s", config.Path, err)
+			return ErrCantOpen
+		}
 	}
 
-	store, err = cayley.NewGraph(dbType, dbPath, nil)
+	store, err = cayley.NewGraph(config.Type, config.Path, options)
 	if err != nil {
-		log.Errorf("could not open database at %s : %s", dbPath, err)
+		log.Errorf("could not open database at %s : %s", config.Path, err)
 		return ErrCantOpen
 	}
 
@@ -109,7 +123,7 @@ func Healthcheck() health.Status {
 	var err error
 	if store != nil {
 		t := cayley.NewTransaction()
-		q := cayley.Quad("cayley", "is", "healthy", "")
+		q := cayley.Triple("cayley", "is", "healthy")
 		t.AddQuad(q)
 		t.RemoveQuad(q)
 		glog.SetStderrThreshold("FATAL") // TODO REMOVE ME
@@ -125,17 +139,19 @@ func Healthcheck() health.Status {
 // If the path leads to multiple values or if a database error occurs, an empty string and an error are returned
 func toValue(p *path.Path) (string, error) {
 	var value string
+	found := false
 
 	it, _ := p.BuildIterator().Optimize()
 	defer it.Close()
 	for cayley.RawNext(it) {
-		if value != "" {
+		if found {
 			log.Error("failed query in toValue: used on an iterator containing multiple values")
 			return "", ErrInconsistent
 		}
 
 		if it.Result() != nil {
 			value = store.NameOf(it.Result())
+			found = true
 		}
 	}
 	if it.Err() != nil {
@@ -156,10 +172,7 @@ func toValues(p *path.Path) ([]string, error) {
 	defer it.Close()
 	for cayley.RawNext(it) {
 		if it.Result() != nil {
-			value := store.NameOf(it.Result())
-			if value != "" {
-				values = append(values, value)
-			}
+			values = append(values, store.NameOf(it.Result()))
 		}
 	}
 	if it.Err() != nil {

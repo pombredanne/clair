@@ -5,17 +5,19 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/coreos/clair/config"
 	"github.com/coreos/clair/database"
 	"github.com/coreos/clair/utils/types"
 	"github.com/stretchr/testify/assert"
 
 	// Register detectors
+	_ "github.com/coreos/clair/worker/detectors/data"
 	_ "github.com/coreos/clair/worker/detectors/os"
 	_ "github.com/coreos/clair/worker/detectors/packages"
 )
 
 func TestDistUpgrade(t *testing.T) {
-	database.Open("memstore", "")
+	database.Open(&config.DatabaseConfig{Type: "memstore"})
 	defer database.Close()
 
 	_, f, _, _ := runtime.Caller(0)
@@ -24,9 +26,15 @@ func TestDistUpgrade(t *testing.T) {
 	// blank.tar: MAINTAINER Quentin MACHU <quentin.machu.fr>
 	// wheezy.tar: FROM debian:wheezy
 	// jessie.tar: RUN sed -i "s/precise/trusty/" /etc/apt/sources.list && apt-get update && apt-get -y dist-upgrade
-	assert.Nil(t, Process("blank", "", path+"blank.tar.gz"))
-	assert.Nil(t, Process("wheezy", "blank", path+"wheezy.tar.gz"))
-	assert.Nil(t, Process("jessie", "wheezy", path+"jessie.tar.gz"))
+	assert.Nil(t, Process("blank", "", path+"blank.tar.gz", "Docker"))
+	assert.Nil(t, Process("wheezy", "blank", path+"wheezy.tar.gz", "Docker"))
+	assert.Nil(t, Process("jessie", "wheezy", path+"jessie.tar.gz", "Docker"))
+
+	err := Process("blank", "", path+"blank.tar.gz", "")
+	assert.Error(t, err, "could not process a layer which does not have a specified format")
+
+	err = Process("blank", "", path+"blank.tar.gz", "invalid")
+	assert.Error(t, err, "could not process a layer which does not have a supported format")
 
 	wheezy, err := database.FindOneLayerByID("wheezy", database.FieldLayerAll)
 	if assert.Nil(t, err) {

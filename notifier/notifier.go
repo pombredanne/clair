@@ -17,157 +17,209 @@
 package notifier
 
 import (
-	"bytes"
-	"encoding/json"
-	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/coreos/pkg/capnslog"
 	"github.com/coreos/pkg/timeutil"
+	"github.com/pborman/uuid"
+
+	"github.com/coreos/clair/config"
 	"github.com/coreos/clair/database"
-	cerrors "github.com/coreos/clair/utils/errors"
 	"github.com/coreos/clair/health"
 	"github.com/coreos/clair/utils"
-	"github.com/pborman/uuid"
 )
-
-// A Notifier dispatches notifications
-type Notifier interface {
-	Run(*utils.Stopper)
-}
 
 var log = capnslog.NewPackageLogger("github.com/coreos/clair", "notifier")
 
 const (
-	maxBackOff    = 5 * time.Minute
-	checkInterval = 5 * time.Second
-
-	refreshLockAnticipation = time.Minute * 2
-	lockDuration            = time.Minute*8 + refreshLockAnticipation
+	checkInterval       = 5 * time.Minute
+	refreshLockDuration = time.Minute * 2
+	lockDuration        = time.Minute*8 + refreshLockDuration
+	maxBackOff          = 15 * time.Minute
 )
 
-// A HTTPNotifier dispatches notifications to an HTTP endpoint with POST requests
-type HTTPNotifier struct {
-	url string
+// TODO(Quentin-M): Allow registering custom notification handlers.
+
+// A Notification represents the structure of the notifications that are sent by a Notifier.
+type Notification struct {
+	Name, Type string
+	Content    interface{}
 }
 
-// NewHTTPNotifier initializes a new HTTPNotifier
-func NewHTTPNotifier(URL string) (*HTTPNotifier, error) {
-	if _, err := url.Parse(URL); err != nil {
-		return nil, cerrors.NewBadRequestError("could not create a notifier with an invalid URL")
+var notifiers = make(map[string]Notifier)
+
+// Notifier represents anything that can transmit notifications.
+type Notifier interface {
+	// Configure attempts to initialize the notifier with the provided configuration.
+	// It returns whether the notifier is enabled or not.
+	Configure(*config.NotifierConfig) (bool, error)
+	// Send transmits the specified notification.
+	Send(notification *Notification) error
+}
+
+// RegisterNotifier makes a Fetcher available by the provided name.
+// If Register is called twice with the same name or if driver is nil,
+// it panics.
+func RegisterNotifier(name string, n Notifier) {
+	if name == "" {
+		panic("notifier: could not register a Notifier with an empty name")
 	}
 
-	notifier := &HTTPNotifier{url: URL}
-	health.RegisterHealthchecker("notifier", notifier.Healthcheck)
+	if n == nil {
+		panic("notifier: could not register a nil Notifier")
+	}
 
-	return notifier, nil
+	if _, dup := notifiers[name]; dup {
+		panic("notifier: RegisterNotifier called twice for " + name)
+	}
+
+	notifiers[name] = n
 }
 
-// Run pops notifications from the database, lock them, send them, mark them as
-// send and unlock them
-//
-// It uses an exponential backoff when POST requests fail
-func (notifier *HTTPNotifier) Run(st *utils.Stopper) {
-	defer st.End()
+// Run starts the Notifier service.
+func Run(config *config.NotifierConfig, stopper *utils.Stopper) {
+	defer stopper.End()
+
+	// Configure registered notifiers.
+	for notifierName, notifier := range notifiers {
+		if configured, err := notifier.Configure(config); configured {
+			log.Infof("notifier '%s' configured\n", notifierName)
+		} else {
+			delete(notifiers, notifierName)
+			if err != nil {
+				log.Errorf("could not configure notifier '%s': %s", notifierName, err)
+			}
+		}
+	}
+
+	// Do not run the updater if there is no notifier enabled.
+	if len(notifiers) == 0 {
+		log.Infof("notifier service is disabled")
+		return
+	}
 
 	whoAmI := uuid.New()
-	log.Infof("HTTP notifier started. URL: %s. Lock Identifier: %s", notifier.url, whoAmI)
+	log.Infof("notifier service started. lock identifier: %s\n", whoAmI)
 
-	for {
-		node, notification, err := database.FindOneNotificationToSend(database.GetDefaultNotificationWrapper())
-		if notification == nil || err != nil {
-			if err != nil {
-				log.Warningf("could not get notification to send: %s.", err)
-			}
+	// Register healthchecker.
+	health.RegisterHealthchecker("notifier", Healthcheck)
 
-			if !st.Sleep(checkInterval) {
-				break
-			}
-
-			continue
-		}
-
-		// Try to lock the notification
-		hasLock, hasLockUntil := database.Lock(node, lockDuration, whoAmI)
-		if !hasLock {
-			continue
-		}
-
-		for backOff := time.Duration(0); ; backOff = timeutil.ExpBackoff(backOff, maxBackOff) {
-			// Backoff, it happens when an error occurs during the communication
-			// with the notification endpoint
-			if backOff > 0 {
-				// Renew lock before going to sleep if necessary
-				if time.Now().Add(backOff).After(hasLockUntil.Add(-refreshLockAnticipation)) {
-					hasLock, hasLockUntil = database.Lock(node, lockDuration, whoAmI)
-					if !hasLock {
-						log.Warning("lost lock ownership, aborting")
-						break
-					}
-				}
-
-				// Sleep
-				if !st.Sleep(backOff) {
-					return
-				}
-			}
-
-			// Get notification content
-			content, err := notification.GetContent()
-			if err != nil {
-				log.Warningf("could not get content of notification '%s': %s", notification.GetName(), err.Error())
-				break
-			}
-
-			// Marshal the notification content
-			jsonContent, err := json.Marshal(struct {
-				Name, Type string
-				Content    interface{}
-			}{
-				Name:    notification.GetName(),
-				Type:    notification.GetType(),
-				Content: content,
-			})
-			if err != nil {
-				log.Errorf("could not marshal content of notification '%s': %s", notification.GetName(), err.Error())
-				break
-			}
-
-			// Post notification
-			req, _ := http.NewRequest("POST", notifier.url, bytes.NewBuffer(jsonContent))
-			req.Header.Set("Content-Type", "application/json")
-
-			client := &http.Client{}
-			res, err := client.Do(req)
-			if err != nil {
-				log.Warningf("could not post notification '%s': %s", notification.GetName(), err.Error())
-				continue
-			}
-			res.Body.Close()
-
-			if res.StatusCode != 200 && res.StatusCode != 201 {
-				log.Warningf("could not post notification '%s': got status code %d", notification.GetName(), res.StatusCode)
-				continue
-			}
-
-			// Mark the notification as sent
-			database.MarkNotificationAsSent(node)
-
-			log.Infof("sent notification '%s' successfully", notification.GetName())
+	for running := true; running; {
+		// Find task.
+		// TODO(Quentin-M): Combine node and notification.
+		node, notification := findTask(whoAmI, stopper)
+		if node == "" && notification == nil {
+			// Interrupted while finding a task, Clair is stopping.
 			break
 		}
 
-		if hasLock {
+		// Handle task.
+		done := make(chan bool, 1)
+		go func() {
+			success, interrupted := handleTask(notification, stopper, config.Attempts)
+			if success {
+				database.MarkNotificationAsSent(node)
+			}
+			if interrupted {
+				running = false
+			}
 			database.Unlock(node, whoAmI)
+			done <- true
+		}()
+
+		// Refresh task lock until done.
+	outer:
+		for {
+			select {
+			case <-done:
+				break outer
+			case <-time.After(refreshLockDuration):
+				database.Lock(node, lockDuration, whoAmI)
+			}
 		}
 	}
 
-	log.Info("HTTP notifier stopped")
+	log.Info("notifier service stopped")
 }
 
-// Healthcheck returns the health of the notifier service
-func (notifier *HTTPNotifier) Healthcheck() health.Status {
+func findTask(whoAmI string, stopper *utils.Stopper) (string, database.Notification) {
+	for {
+		// Find a notification to send.
+		node, notification, err := database.FindOneNotificationToSend(database.GetDefaultNotificationWrapper())
+		if err != nil {
+			log.Warningf("could not get notification to send: %s", err)
+		}
+
+		// No notification or error: wait.
+		if notification == nil || err != nil {
+			if !stopper.Sleep(checkInterval) {
+				return "", nil
+			}
+			continue
+		}
+
+		// Lock the notification.
+		if hasLock, _ := database.Lock(node, lockDuration, whoAmI); hasLock {
+			log.Infof("found and locked a notification: %s", notification.GetName())
+			return node, notification
+		}
+	}
+}
+
+func handleTask(notification database.Notification, st *utils.Stopper, maxAttempts int) (bool, bool) {
+	// Get notification content.
+	// TODO(Quentin-M): Split big notifications.
+	notificationContent, err := notification.GetContent()
+	if err != nil {
+		log.Warningf("could not get content of notification '%s': %s", notification.GetName(), err)
+		return false, false
+	}
+
+	// Create notification.
+	payload := &Notification{
+		Name:    notification.GetName(),
+		Type:    notification.GetType(),
+		Content: notificationContent,
+	}
+
+	// Send notification.
+	for notifierName, notifier := range notifiers {
+		var attempts int
+		var backOff time.Duration
+		for {
+			// Max attempts exceeded.
+			if attempts >= maxAttempts {
+				log.Infof("giving up on sending notification '%s' to notifier '%s': max attempts exceeded (%d)\n", notification.GetName(), notifierName, maxAttempts)
+				return false, false
+			}
+
+			// Backoff.
+			if backOff > 0 {
+				log.Infof("waiting %v before retrying to send notification '%s' to notifier '%s' (Attempt %d / %d)\n", backOff, notification.GetName(), notifierName, attempts+1, maxAttempts)
+				if !st.Sleep(backOff) {
+					return false, true
+				}
+			}
+
+			// Send using the current notifier.
+			if err := notifier.Send(payload); err == nil {
+				// Send has been successful. Go to the next one.
+				break
+			}
+
+			// Send failed; increase attempts/backoff and retry.
+			log.Errorf("could not send notification '%s' to notifier '%s': %s", notification.GetName(), notifierName, err)
+			backOff = timeutil.ExpBackoff(backOff, maxBackOff)
+			attempts++
+		}
+	}
+
+	log.Infof("successfully sent notification '%s'\n", notification.GetName())
+	return true, false
+}
+
+// Healthcheck returns the health of the notifier service.
+func Healthcheck() health.Status {
 	queueSize, err := database.CountNotificationsToSend()
 	return health.Status{IsEssential: false, IsHealthy: err == nil, Details: struct{ QueueSize int }{QueueSize: queueSize}}
 }
