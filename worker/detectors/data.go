@@ -19,12 +19,14 @@ package detectors
 import (
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 
 	cerrors "github.com/coreos/clair/utils/errors"
+	"github.com/coreos/pkg/capnslog"
 )
 
 // The DataDetector interface defines a way to detect the required data from input path
@@ -38,6 +40,11 @@ type DataDetector interface {
 var (
 	dataDetectorsLock sync.Mutex
 	dataDetectors     = make(map[string]DataDetector)
+
+	log = capnslog.NewPackageLogger("github.com/coreos/clair", "detectors")
+
+	// ErrCouldNotFindLayer is returned when we could not download or open the layer file.
+	ErrCouldNotFindLayer = cerrors.NewBadRequestError("could not find layer")
 )
 
 // RegisterDataDetector provides a way to dynamically register an implementation of a
@@ -63,29 +70,53 @@ func RegisterDataDetector(name string, f DataDetector) {
 }
 
 // DetectData finds the Data of the layer by using every registered DataDetector
-func DetectData(path string, format string, toExtract []string, maxFileSize int64) (data map[string][]byte, err error) {
+func DetectData(format, path string, headers map[string]string, toExtract []string, maxFileSize int64) (data map[string][]byte, err error) {
 	var layerReader io.ReadCloser
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		r, err := http.Get(path)
+		// Create a new HTTP request object.
+		request, err := http.NewRequest("GET", path, nil)
 		if err != nil {
-			return nil, cerrors.ErrCouldNotDownload
+			return nil, ErrCouldNotFindLayer
 		}
+
+		// Set any provided HTTP Headers.
+		if headers != nil {
+			for k, v := range headers {
+				request.Header.Set(k, v)
+			}
+		}
+
+		// Send the request and handle the response.
+		r, err := http.DefaultClient.Do(request)
+		if err != nil {
+			log.Warningf("could not download layer: %s", err)
+			return nil, ErrCouldNotFindLayer
+		}
+
+		// Fail if we don't receive a 2xx HTTP status code.
+		if math.Floor(float64(r.StatusCode/100)) != 2 {
+			log.Warningf("could not download layer: got status code %d, expected 2XX", r.StatusCode)
+			return nil, ErrCouldNotFindLayer
+		}
+
 		layerReader = r.Body
 	} else {
 		layerReader, err = os.Open(path)
 		if err != nil {
-			return nil, cerrors.ErrNotFound
+			return nil, ErrCouldNotFindLayer
 		}
 	}
 	defer layerReader.Close()
 
 	for _, detector := range dataDetectors {
 		if detector.Supported(path, format) {
-			if data, err = detector.Detect(layerReader, toExtract, maxFileSize); err == nil {
-				return data, nil
+			data, err = detector.Detect(layerReader, toExtract, maxFileSize)
+			if err != nil {
+				return nil, err
 			}
+			return data, nil
 		}
 	}
 
-	return nil, nil
+	return nil, cerrors.NewBadRequestError(fmt.Sprintf("unsupported image format '%s'", format))
 }
