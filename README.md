@@ -121,15 +121,15 @@ $ ./$GOBIN/clair -config=config.yaml
 
 While container images for every releases are available at [quay.io/repository/coreos/clair], container images built on the latest available source code are available at [quay.io/repository/coreos/clair-git].
 
-[quay.io/repository/coreos/clair]: quay.io/repository/coreos/clair
-[quay.io/repository/coreos/clair-git]: quay.io/repository/coreos/clair-git
+[quay.io/repository/coreos/clair]: https://quay.io/repository/coreos/clair
+[quay.io/repository/coreos/clair-git]: https://quay.io/repository/coreos/clair-git
 
 ## Documentation
 
-Documentation can be found in a `README.md` file located in the directory of the component.
+The latest stable documentation can be found [on the CoreOS website]. Documentation for the current branch can be found [inside the Documentation directory][docs-dir] at the root of the project's source code.
 
-- [Notifier](https://github.com/coreos/clair/blob/master/notifier/README.md)
-- [v1 API](https://github.com/coreos/clair/blob/master/api/v1/README.md)
+[on the CoreOS website]: https://coreos.com/clair/docs/latest/
+[docs-dir]: /Documentation
 
 ### Architecture at a Glance
 
