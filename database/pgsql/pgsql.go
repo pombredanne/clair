@@ -1,4 +1,4 @@
-// Copyright 2015 clair authors
+// Copyright 2017 clair authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,22 +20,20 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/url"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
-	"bitbucket.org/liamstask/goose/lib/goose"
+	"gopkg.in/yaml.v2"
+
 	"github.com/coreos/pkg/capnslog"
 	"github.com/hashicorp/golang-lru"
 	"github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
-	"gopkg.in/yaml.v2"
+	"github.com/remind101/migrate"
 
-	"github.com/coreos/clair/config"
 	"github.com/coreos/clair/database"
-	"github.com/coreos/clair/utils"
-	cerrors "github.com/coreos/clair/utils/errors"
+	"github.com/coreos/clair/database/pgsql/migrations"
+	"github.com/coreos/clair/pkg/commonerr"
 )
 
 var (
@@ -115,11 +113,13 @@ type Config struct {
 	FixturePath             string
 }
 
-// openDatabase opens a PostgresSQL-backed Datastore using the given configuration.
-// It immediately every necessary migrations. If ManageDatabaseLifecycle is specified,
-// the database will be created first. If FixturePath is specified, every SQL queries that are
-// present insides will be executed.
-func openDatabase(registrableComponentConfig config.RegistrableComponentConfig) (database.Datastore, error) {
+// openDatabase opens a PostgresSQL-backed Datastore using the given
+// configuration.
+//
+// It immediately runs all necessary migrations. If ManageDatabaseLifecycle is
+// specified, the database will be created first. If FixturePath is specified,
+// every SQL queries that are present insides will be executed.
+func openDatabase(registrableComponentConfig database.RegistrableComponentConfig) (database.Datastore, error) {
 	var pg pgSQL
 	var err error
 
@@ -144,7 +144,7 @@ func openDatabase(registrableComponentConfig config.RegistrableComponentConfig) 
 	// Create database.
 	if pg.config.ManageDatabaseLifecycle {
 		log.Info("pgsql: creating database")
-		if err := createDatabase(pgSourceURL, dbName); err != nil {
+		if err = createDatabase(pgSourceURL, dbName); err != nil {
 			return nil, err
 		}
 	}
@@ -157,13 +157,13 @@ func openDatabase(registrableComponentConfig config.RegistrableComponentConfig) 
 	}
 
 	// Verify database state.
-	if err := pg.DB.Ping(); err != nil {
+	if err = pg.DB.Ping(); err != nil {
 		pg.Close()
 		return nil, fmt.Errorf("pgsql: could not open database: %v", err)
 	}
 
 	// Run migrations.
-	if err := migrate(pg.config.Source); err != nil {
+	if err = migrateDatabase(pg.DB); err != nil {
 		pg.Close()
 		return nil, err
 	}
@@ -196,12 +196,12 @@ func openDatabase(registrableComponentConfig config.RegistrableComponentConfig) 
 
 func parseConnectionString(source string) (dbName string, pgSourceURL string, err error) {
 	if source == "" {
-		return "", "", cerrors.NewBadRequestError("pgsql: no database connection string specified")
+		return "", "", commonerr.NewBadRequestError("pgsql: no database connection string specified")
 	}
 
 	sourceURL, err := url.Parse(source)
 	if err != nil {
-		return "", "", cerrors.NewBadRequestError("pgsql: database connection string is not a valid URL")
+		return "", "", commonerr.NewBadRequestError("pgsql: database connection string is not a valid URL")
 	}
 
 	dbName = strings.TrimPrefix(sourceURL.Path, "/")
@@ -214,29 +214,10 @@ func parseConnectionString(source string) (dbName string, pgSourceURL string, er
 }
 
 // migrate runs all available migrations on a pgSQL database.
-func migrate(source string) error {
+func migrateDatabase(db *sql.DB) error {
 	log.Info("running database migrations")
 
-	_, filename, _, _ := runtime.Caller(1)
-	migrationDir := filepath.Join(filepath.Dir(filename), "/migrations/")
-	conf := &goose.DBConf{
-		MigrationsDir: migrationDir,
-		Driver: goose.DBDriver{
-			Name:    "postgres",
-			OpenStr: source,
-			Import:  "github.com/lib/pq",
-			Dialect: &goose.PostgresDialect{},
-		},
-	}
-
-	// Determine the most recent revision available from the migrations folder.
-	target, err := goose.GetMostRecentDBVersion(conf.MigrationsDir)
-	if err != nil {
-		return fmt.Errorf("pgsql: could not get most recent migration: %v", err)
-	}
-
-	// Run migrations.
-	err = goose.RunMigrations(conf, conf.MigrationsDir, target)
+	err := migrate.NewPostgresMigrator(db).Exec(migrate.Up, migrations.Migrations...)
 	if err != nil {
 		return fmt.Errorf("pgsql: an error occured while running migrations: %v", err)
 	}
@@ -299,7 +280,7 @@ func handleError(desc string, err error) error {
 	}
 
 	if err == sql.ErrNoRows {
-		return cerrors.ErrNotFound
+		return commonerr.ErrNotFound
 	}
 
 	log.Errorf("%s: %v", desc, err)
@@ -319,5 +300,7 @@ func isErrUniqueViolation(err error) bool {
 }
 
 func observeQueryTime(query, subquery string, start time.Time) {
-	utils.PrometheusObserveTimeMilliseconds(promQueryDurationMilliseconds.WithLabelValues(query, subquery), start)
+	promQueryDurationMilliseconds.
+		WithLabelValues(query, subquery).
+		Observe(float64(time.Since(start).Nanoseconds()) / float64(time.Millisecond))
 }

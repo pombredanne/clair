@@ -1,4 +1,4 @@
-// Copyright 2015 clair authors
+// Copyright 2017 clair authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,6 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"time"
-
-	"github.com/coreos/clair/utils/types"
 )
 
 // ID is only meant to be used by database implementations and should never be used for anything else.
@@ -40,7 +38,8 @@ type Layer struct {
 type Namespace struct {
 	Model
 
-	Name string
+	Name          string
+	VersionFormat string
 }
 
 type Feature struct {
@@ -54,7 +53,7 @@ type FeatureVersion struct {
 	Model
 
 	Feature    Feature
-	Version    types.Version
+	Version    string
 	AffectedBy []Vulnerability
 
 	// For output purposes. Only make sense when the feature version is in the context of an image.
@@ -69,7 +68,7 @@ type Vulnerability struct {
 
 	Description string
 	Link        string
-	Severity    types.Priority
+	Severity    Severity
 
 	Metadata MetadataMap
 
@@ -78,7 +77,7 @@ type Vulnerability struct {
 
 	// For output purposes. Only make sense when the vulnerability
 	// is already about a specific Feature/FeatureVersion.
-	FixedBy types.Version `json:",omitempty"`
+	FixedBy string `json:",omitempty"`
 }
 
 type MetadataMap map[string]interface{}

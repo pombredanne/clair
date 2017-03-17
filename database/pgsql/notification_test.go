@@ -1,4 +1,4 @@
-// Copyright 2015 clair authors
+// Copyright 2017 clair authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,8 +21,9 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/coreos/clair/database"
-	cerrors "github.com/coreos/clair/utils/errors"
-	"github.com/coreos/clair/utils/types"
+	"github.com/coreos/clair/ext/versionfmt"
+	"github.com/coreos/clair/ext/versionfmt/dpkg"
+	"github.com/coreos/clair/pkg/commonerr"
 )
 
 func TestNotification(t *testing.T) {
@@ -35,17 +36,23 @@ func TestNotification(t *testing.T) {
 
 	// Try to get a notification when there is none.
 	_, err = datastore.GetAvailableNotification(time.Second)
-	assert.Equal(t, cerrors.ErrNotFound, err)
+	assert.Equal(t, commonerr.ErrNotFound, err)
 
 	// Create some data.
 	f1 := database.Feature{
-		Name:      "TestNotificationFeature1",
-		Namespace: database.Namespace{Name: "TestNotificationNamespace1"},
+		Name: "TestNotificationFeature1",
+		Namespace: database.Namespace{
+			Name:          "TestNotificationNamespace1",
+			VersionFormat: dpkg.ParserName,
+		},
 	}
 
 	f2 := database.Feature{
-		Name:      "TestNotificationFeature2",
-		Namespace: database.Namespace{Name: "TestNotificationNamespace1"},
+		Name: "TestNotificationFeature2",
+		Namespace: database.Namespace{
+			Name:          "TestNotificationNamespace1",
+			VersionFormat: dpkg.ParserName,
+		},
 	}
 
 	l1 := database.Layer{
@@ -53,7 +60,7 @@ func TestNotification(t *testing.T) {
 		Features: []database.FeatureVersion{
 			{
 				Feature: f1,
-				Version: types.NewVersionUnsafe("0.1"),
+				Version: "0.1",
 			},
 		},
 	}
@@ -63,7 +70,7 @@ func TestNotification(t *testing.T) {
 		Features: []database.FeatureVersion{
 			{
 				Feature: f1,
-				Version: types.NewVersionUnsafe("0.2"),
+				Version: "0.2",
 			},
 		},
 	}
@@ -73,7 +80,7 @@ func TestNotification(t *testing.T) {
 		Features: []database.FeatureVersion{
 			{
 				Feature: f1,
-				Version: types.NewVersionUnsafe("0.3"),
+				Version: "0.3",
 			},
 		},
 	}
@@ -83,7 +90,7 @@ func TestNotification(t *testing.T) {
 		Features: []database.FeatureVersion{
 			{
 				Feature: f2,
-				Version: types.NewVersionUnsafe("0.1"),
+				Version: "0.1",
 			},
 		},
 	}
@@ -105,7 +112,7 @@ func TestNotification(t *testing.T) {
 		FixedIn: []database.FeatureVersion{
 			{
 				Feature: f1,
-				Version: types.NewVersionUnsafe("1.0"),
+				Version: "1.0",
 			},
 		},
 	}
@@ -118,7 +125,7 @@ func TestNotification(t *testing.T) {
 		// Verify the renotify behaviour.
 		if assert.Nil(t, datastore.SetNotificationNotified(notification.Name)) {
 			_, err := datastore.GetAvailableNotification(time.Second)
-			assert.Equal(t, cerrors.ErrNotFound, err)
+			assert.Equal(t, commonerr.ErrNotFound, err)
 
 			time.Sleep(50 * time.Millisecond)
 			notificationB, err := datastore.GetAvailableNotification(20 * time.Millisecond)
@@ -156,20 +163,20 @@ func TestNotification(t *testing.T) {
 		assert.Nil(t, datastore.DeleteNotification(notification.Name))
 
 		_, err = datastore.GetAvailableNotification(time.Millisecond)
-		assert.Equal(t, cerrors.ErrNotFound, err)
+		assert.Equal(t, commonerr.ErrNotFound, err)
 	}
 
 	// Update a vulnerability and ensure that the old/new vulnerabilities are correct.
 	v1b := v1
-	v1b.Severity = types.High
+	v1b.Severity = database.HighSeverity
 	v1b.FixedIn = []database.FeatureVersion{
 		{
 			Feature: f1,
-			Version: types.MinVersion,
+			Version: versionfmt.MinVersion,
 		},
 		{
 			Feature: f2,
-			Version: types.MaxVersion,
+			Version: versionfmt.MaxVersion,
 		},
 	}
 

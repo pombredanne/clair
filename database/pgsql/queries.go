@@ -29,8 +29,8 @@ const (
 	// namespace.go
 	soiNamespace = `
 		WITH new_namespace AS (
-			INSERT INTO Namespace(name)
-			SELECT CAST($1 AS VARCHAR)
+			INSERT INTO Namespace(name, version_format)
+			SELECT CAST($1 AS VARCHAR), CAST($2 AS VARCHAR)
 			WHERE NOT EXISTS (SELECT name FROM Namespace WHERE name = $1)
 			RETURNING id
 		)
@@ -39,7 +39,7 @@ const (
 		SELECT id FROM new_namespace`
 
 	searchNamespace = `SELECT id FROM Namespace WHERE name = $1`
-	listNamespace   = `SELECT id, name FROM Namespace`
+	listNamespace   = `SELECT id, name, version_format FROM Namespace`
 
 	// feature.go
 	soiFeature = `
@@ -63,21 +63,21 @@ const (
 			WHERE NOT EXISTS (SELECT id FROM FeatureVersion WHERE feature_id = $1 AND version = $2)
 			RETURNING id
 		)
-		SELECT 'exi', id FROM FeatureVersion WHERE feature_id = $1 AND version = $2
+		SELECT false, id FROM FeatureVersion WHERE feature_id = $1 AND version = $2
 		UNION
-		SELECT 'new', id FROM new_featureversion`
+		SELECT true, id FROM new_featureversion`
 
 	searchVulnerabilityFixedInFeature = `
 		SELECT id, vulnerability_id, version FROM Vulnerability_FixedIn_Feature
     WHERE feature_id = $1`
 
 	insertVulnerabilityAffectsFeatureVersion = `
-		INSERT INTO Vulnerability_Affects_FeatureVersion(vulnerability_id,
-    featureversion_id, fixedin_id) VALUES($1, $2, $3)`
+		INSERT INTO Vulnerability_Affects_FeatureVersion(vulnerability_id, featureversion_id, fixedin_id)
+		VALUES($1, $2, $3)`
 
 	// layer.go
 	searchLayer = `
-		SELECT l.id, l.name, l.engineversion, p.id, p.name, n.id, n.name
+		SELECT l.id, l.name, l.engineversion, p.id, p.name, n.id, n.name, n.version_format
 		FROM Layer l
 			LEFT JOIN Layer p ON l.parent_id = p.id
 			LEFT JOIN Namespace n ON l.namespace_id = n.id
@@ -93,7 +93,7 @@ const (
 			FROM Layer l, layer_tree lt
 			WHERE l.id = lt.parent_id
 		)
-		SELECT ldf.featureversion_id, ldf.modification, fn.id, fn.name, f.id, f.name, fv.id, fv.version, ltree.id, ltree.name
+		SELECT ldf.featureversion_id, ldf.modification, fn.id, fn.name, fn.version_format, f.id, f.name, fv.id, fv.version, ltree.id, ltree.name
 		FROM Layer_diff_FeatureVersion ldf
 		JOIN (
 			SELECT row_number() over (ORDER BY depth DESC), id, name FROM layer_tree
@@ -103,7 +103,7 @@ const (
 
 	searchFeatureVersionVulnerability = `
 			SELECT vafv.featureversion_id, v.id, v.name, v.description, v.link, v.severity, v.metadata,
-				vn.name, vfif.version
+				vn.name, vn.version_format, vfif.version
 			FROM Vulnerability_Affects_FeatureVersion vafv, Vulnerability v,
 					 Namespace vn, Vulnerability_FixedIn_Feature vfif
 			WHERE vafv.featureversion_id = ANY($1::integer[])
@@ -140,7 +140,7 @@ const (
 
 	// vulnerability.go
 	searchVulnerabilityBase = `
-	  SELECT v.id, v.name, n.id, n.name, v.description, v.link, v.severity, v.metadata
+	  SELECT v.id, v.name, n.id, n.name, n.version_format, v.description, v.link, v.severity, v.metadata
 	  FROM Vulnerability v JOIN Namespace n ON v.namespace_id = n.id`
 	searchVulnerabilityForUpdate          = ` FOR UPDATE OF v`
 	searchVulnerabilityByNamespaceAndName = ` WHERE n.name = $1 AND v.name = $2 AND v.deleted_at IS NULL`
@@ -160,10 +160,16 @@ const (
 		VALUES($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
 		RETURNING id`
 
-	insertVulnerabilityFixedInFeature = `
-		INSERT INTO Vulnerability_FixedIn_Feature(vulnerability_id, feature_id, version)
-		VALUES($1, $2, $3)
-		RETURNING id`
+	soiVulnerabilityFixedInFeature = `
+		WITH new_fixedinfeature AS (
+			INSERT INTO Vulnerability_FixedIn_Feature(vulnerability_id, feature_id, version)
+			SELECT CAST($1 AS INTEGER), CAST($2 AS INTEGER), CAST($3 AS VARCHAR)
+			WHERE NOT EXISTS (SELECT id FROM Vulnerability_FixedIn_Feature WHERE vulnerability_id = $1 AND feature_id = $2)
+			RETURNING id
+		)
+		SELECT false, id FROM Vulnerability_FixedIn_Feature WHERE vulnerability_id = $1 AND feature_id = $2
+		UNION
+		SELECT true, id FROM new_fixedinfeature`
 
 	searchFeatureVersionByFeature = `SELECT id, version FROM FeatureVersion WHERE feature_id = $1`
 
@@ -205,22 +211,20 @@ const (
 		WHERE name = $1`
 
 	searchNotificationLayerIntroducingVulnerability = `
-	WITH subquery AS (
-		SELECT l.ID, l.name
-		FROM Vulnerability_Affects_FeatureVersion vafv, FeatureVersion fv, Layer_diff_FeatureVersion ldfv, Layer l
-		WHERE l.id >= $2
-			AND vafv.vulnerability_id = $1
-			AND vafv.featureversion_id = fv.id
-			AND ldfv.featureversion_id = fv.id
-			AND ldfv.modification = 'add'
-			AND ldfv.layer_id = l.id
-		ORDER BY l.ID
-	)
-
-	SELECT *
-	FROM subquery
-	LIMIT $3;
-`
+		WITH LDFV AS (
+		  SELECT DISTINCT ldfv.layer_id
+		  FROM Vulnerability_Affects_FeatureVersion vafv, FeatureVersion fv, Layer_diff_FeatureVersion ldfv
+		  WHERE ldfv.layer_id >= $2
+		    AND vafv.vulnerability_id = $1
+		    AND vafv.featureversion_id = fv.id
+		    AND ldfv.featureversion_id = fv.id
+		    AND ldfv.modification = 'add'
+		  ORDER BY ldfv.layer_id
+		)
+		SELECT l.id, l.name
+		FROM LDFV, Layer l
+		WHERE LDFV.layer_id = l.id
+		LIMIT $3`
 
 	// complex_test.go
 	searchComplexTestFeatureVersionAffects = `

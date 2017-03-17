@@ -1,36 +1,34 @@
 language: go
-
-go:
-  - 1.6
-  - 1.5
-  - tip
-
-sudo: false
-
-before_install:
-  - export GO15VENDOREXPERIMENT=1
-  - RepoName=`basename $PWD`; SrcDir=`dirname $PWD`; DestDir="`dirname $SrcDir`/coreos"
-  - if [[ "$SrcDir" != "$DestDir" ]]; then mv "$SrcDir" "$DestDir"; cd ../../coreos/$RepoName; export TRAVIS_BUILD_DIR=`dirname $TRAVIS_BUILD_DIR`/$RepoName; fi
-
+sudo: required
 
 install:
-  - echo 'nop'
+- curl https://glide.sh/get | sh
 
 script:
-  - go test -v $(go list ./... | grep -v /vendor/)
+- go test $(glide novendor | grep -v contrib)
+
+dist: trusty
 
 services:
   - postgresql
-
-addons:
-  apt:
-    packages:
-      - rpm
-  postgresql: "9.4"
 
 notifications:
   email: false
 
 matrix:
-  allow_failures:
-    - go: tip
+  include:
+  - addons:
+      apt:
+        packages:
+        - rpm
+      postgresql: 9.4
+  - addons:
+      apt:
+        packages:
+        - rpm
+      postgresql: 9.5
+  - addons:
+      apt:
+        packages:
+        - rpm
+      postgresql: 9.6
