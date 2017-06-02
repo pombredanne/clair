@@ -17,6 +17,8 @@ package clair
 import (
 	"regexp"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/coreos/clair/database"
 	"github.com/coreos/clair/ext/featurefmt"
 	"github.com/coreos/clair/ext/featurens"
@@ -28,7 +30,8 @@ import (
 const (
 	// Version (integer) represents the worker version.
 	// Increased each time the engine changes.
-	Version = 3
+	Version      = 3
+	logLayerName = "layer"
 )
 
 var (
@@ -67,8 +70,7 @@ func ProcessLayer(datastore database.Datastore, imageFormat, name, parentName, p
 		return commonerr.NewBadRequestError("could not process a layer which does not have a format")
 	}
 
-	log.Debugf("layer %s: processing (Location: %s, Engine version: %d, Parent: %s, Format: %s)",
-		name, cleanURL(path), Version, parentName, imageFormat)
+	log.WithFields(log.Fields{logLayerName: name, "path": cleanURL(path), "engine version": Version, "parent layer": parentName, "format": imageFormat}).Debug("processing layer")
 
 	// Check to see if the layer is already in the database.
 	layer, err := datastore.FindLayer(name, false, false)
@@ -88,8 +90,7 @@ func ProcessLayer(datastore database.Datastore, imageFormat, name, parentName, p
 				return err
 			}
 			if err == commonerr.ErrNotFound {
-				log.Warningf("layer %s: the parent layer (%s) is unknown. it must be processed first", name,
-					parentName)
+				log.WithFields(log.Fields{logLayerName: name, "parent layer": parentName}).Warning("the parent layer is unknown. it must be processed first")
 				return ErrParentUnknown
 			}
 			layer.Parent = &parent
@@ -97,17 +98,14 @@ func ProcessLayer(datastore database.Datastore, imageFormat, name, parentName, p
 	} else {
 		// The layer is already in the database, check if we need to update it.
 		if layer.EngineVersion >= Version {
-			log.Debugf(`layer %s: layer content has already been processed in the past with engine %d.
-        Current engine is %d. skipping analysis`, name, layer.EngineVersion, Version)
+			log.WithFields(log.Fields{logLayerName: name, "past engine version": layer.EngineVersion, "current engine version": Version}).Debug("layer content has already been processed in the past with older engine. skipping analysis")
 			return nil
 		}
-
-		log.Debugf(`layer %s: layer content has been analyzed in the past with engine %d. Current
-      engine is %d. analyzing again`, name, layer.EngineVersion, Version)
+		log.WithFields(log.Fields{logLayerName: name, "past engine version": layer.EngineVersion, "current engine version": Version}).Debug("layer content has already been processed in the past with older engine. analyzing again")
 	}
 
 	// Analyze the content.
-	layer.Namespace, layer.Features, err = detectContent(imageFormat, name, path, headers, layer.Parent)
+	layer.Namespaces, layer.Features, err = detectContent(imageFormat, name, path, headers, layer.Parent)
 	if err != nil {
 		return err
 	}
@@ -117,48 +115,54 @@ func ProcessLayer(datastore database.Datastore, imageFormat, name, parentName, p
 
 // detectContent downloads a layer's archive and extracts its Namespace and
 // Features.
-func detectContent(imageFormat, name, path string, headers map[string]string, parent *database.Layer) (namespace *database.Namespace, featureVersions []database.FeatureVersion, err error) {
+func detectContent(imageFormat, name, path string, headers map[string]string, parent *database.Layer) (namespaces []database.Namespace, featureVersions []database.FeatureVersion, err error) {
 	totalRequiredFiles := append(featurefmt.RequiredFilenames(), featurens.RequiredFilenames()...)
 	files, err := imagefmt.Extract(imageFormat, path, headers, totalRequiredFiles)
 	if err != nil {
-		log.Errorf("layer %s: failed to extract data from %s: %s", name, cleanURL(path), err)
+		log.WithError(err).WithFields(log.Fields{logLayerName: name, "path": cleanURL(path)}).Error("failed to extract data from path")
 		return
 	}
 
-	namespace, err = detectNamespace(name, files, parent)
+	namespaces, err = detectNamespaces(name, files, parent)
 	if err != nil {
 		return
 	}
 
 	// Detect features.
-	featureVersions, err = detectFeatureVersions(name, files, namespace, parent)
-	if err != nil {
-		return
+	var fv []database.FeatureVersion
+	// detect feature versions in all namespaces
+	for _, namespace := range namespaces {
+		fv, err = detectFeatureVersions(name, files, &namespace, parent)
+		if err != nil {
+			return
+		}
+		featureVersions = append(featureVersions, fv...)
 	}
 	if len(featureVersions) > 0 {
-		log.Debugf("layer %s: detected %d features", name, len(featureVersions))
+		log.WithFields(log.Fields{logLayerName: name, "feature count": len(featureVersions)}).Debug("detected features")
 	}
 
 	return
 }
 
-func detectNamespace(name string, files tarutil.FilesMap, parent *database.Layer) (namespace *database.Namespace, err error) {
-	namespace, err = featurens.Detect(files)
+func detectNamespaces(name string, files tarutil.FilesMap, parent *database.Layer) (namespaces []database.Namespace, err error) {
+	namespaces, err = featurens.Detect(files)
 	if err != nil {
 		return
 	}
-	if namespace != nil {
-		log.Debugf("layer %s: detected namespace %q", name, namespace.Name)
+	if len(namespaces) > 0 {
+		for _, ns := range namespaces {
+			log.WithFields(log.Fields{logLayerName: name, "detected namespace": ns.Name}).Debug("detected namespace")
+		}
 		return
 	}
 
 	// Fallback to the parent's namespace.
 	if parent != nil {
-		namespace = parent.Namespace
-		if namespace != nil {
-			log.Debugf("layer %s: detected namespace %q (from parent)", name, namespace.Name)
-			return
+		for _, ns := range parent.Namespaces {
+			log.WithFields(log.Fields{logLayerName: name, "detected namespace": ns.Name}).Debug("detected namespace (from parent)")
 		}
+		return
 	}
 
 	return
@@ -210,7 +214,7 @@ func detectFeatureVersions(name string, files tarutil.FilesMap, namespace *datab
 			continue
 		}
 
-		log.Warningf("layer %s: Layer's namespace is unknown but non-namespaced features have been detected", name)
+		log.WithFields(log.Fields{"feature name": feature.Feature.Name, "feature version": feature.Version, logLayerName: name}).Warning("Namespace unknown")
 		err = ErrUnsupported
 		return
 	}
